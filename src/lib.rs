@@ -152,7 +152,7 @@ pub struct ObjectHeader {
 }
 
 #[derive(Debug, BinRead)]
-#[br(little,import{remaining_size: u32, object_type: u32})]
+#[br(little,import{remaining_size: u32, object_type: u32}, return_unexpected_error)]
 pub enum ObjectTypes {
     #[br(pre_assert(object_type == 86))]
     CanMessage86(#[br(args{remaining_size})] CanMessage2),
@@ -162,10 +162,12 @@ pub enum ObjectTypes {
     AppText65(#[br(args{remaining_size})] AppText),
     #[br(pre_assert([72, 6, 7, 8, 9, 90, 96, 92].contains(&object_type)))]
     UnsupportedPadded {
-        #[br(count = remaining_size, pad_after = remaining_size%4)]
-        data: Vec<u8>,
+        #[br(assert(remaining_size>0),pad_before = remaining_size-1, pad_after = remaining_size%4)]
+        //data: Vec<u8>, with size remaining_size and pad_after=remaining_size%4
+        // we cannot use remaining_size as then no read takes place and seek past end is not detected
+        _last_data: u8,
     },
-    Unsupported(#[br(count = remaining_size)] Vec<u8>),
+    Unsupported(#[br(assert(remaining_size>0),pad_before = remaining_size-1)] u8),
 }
 
 // MARK: LogContainer

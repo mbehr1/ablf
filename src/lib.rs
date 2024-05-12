@@ -53,9 +53,8 @@ impl<R: BufRead + Seek> Iterator for ObjectIterator<R> {
     type Item = Object;
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(iter) = &mut self.cur_cont_iter {
-            match iter.next() {
-                Some(obj) => return Some(obj),
-                None => {}
+            if let Some(obj) = iter.next() {
+                return Some(obj);
             }
         }
         if self.cur_cont_iter.is_some() {
@@ -66,81 +65,38 @@ impl<R: BufRead + Seek> Iterator for ObjectIterator<R> {
 
         match Object::read(&mut self.blf.reader) {
             Ok(obj) => {
-                let mut unprocessed =
-                    if obj.object_size > (std::mem::size_of::<Object>() + 4) as u32 {
-                        obj.object_size - (std::mem::size_of::<Object>() + 4) as u32
-                    } else {
-                        0
-                    };
-                let to_skip = match obj.object_type {
-                    10 => {
-                        match LogContainer::read_args(
-                            &mut self.blf.reader,
-                            LogContainerBinReadArgs {
-                                object_size: unprocessed,
-                            },
-                        ) {
-                            Ok(obj) => {
-                                self.cur_cont_iter = Some(obj.into_iter(&self.prev_cont_data));
-                                0
-                            }
-                            Err(e) => {
-                                println!("ObjectIterator Error: {:?}", e);
-                                1
-                            }
+                //println!("{:?}", obj);
+                if let ObjectTypes::LogContainer10(cont) = obj.data {
+                    self.cur_cont_iter = Some(cont.into_iter(&self.prev_cont_data));
+                    if let Some(iter) = &mut self.cur_cont_iter {
+                        if let Some(obj) = iter.next() {
+                            return Some(obj);
                         }
                     }
-                    _ => {
-                        println!(
-                            "ObjectIterator: unknown object type {}, unprocessed={}",
-                            obj.object_type, unprocessed
-                        );
-                        if [65, 72, 6, 7, 8, 9, 90, 96, 92].contains(&obj.object_type) {
-                            unprocessed += unprocessed % 4; // if unprocessed %4 >0 {4-(unprocessed % 4)}else{0}; // align to 4 bytes (weird here again)
-                        }
-                        //unprocessed += if unprocessed %4 >0 {4-(unprocessed % 4)}else{0}; // align to 4 bytes (weird here again)
-                        unprocessed
-                    }
-                };
-                if to_skip > 0 {
-                    println!("ObjectIterator: skipping {}", to_skip);
-                    let old_pos = self.blf.reader.stream_position().unwrap();
-                    self.blf
-                        .reader
-                        .seek(std::io::SeekFrom::Current(to_skip as i64))
-                        .unwrap();
-                    let new_pos = self.blf.reader.stream_position().unwrap();
-                    assert_eq!(new_pos - old_pos, unprocessed as u64);
+                    // if we reach here, the cur_cont_iter returned None
+                    let cont_iter = self.cur_cont_iter.take().unwrap();
+                    self.prev_cont_data = cont_iter.remaining_data();
+                    self.next() // todo remove recursion
+                } else {
+                    Some(obj)
                 }
-                if self.cur_cont_iter.is_none() {
-                    return Some(obj);
-                }
-
-                if let Some(iter) = &mut self.cur_cont_iter {
-                    match iter.next() {
-                        Some(obj) => return Some(obj),
-                        None => {}
-                    }
-                }
-                // if we reach here, the cur_cont_iter returned None
-                let cont_iter = self.cur_cont_iter.take().unwrap();
-                self.prev_cont_data = cont_iter.remaining_data();
-                return self.next(); // todo remove recursion
             }
             Err(e) => {
                 if e.is_eof() {
-                    return None;
+                    None
                 } else {
                     match e {
                         binrw::Error::BadMagic { pos, .. } => {
                             println!("ObjectIterator: BadMagic, skipping 1 byte at pos={}", pos);
                             self.skipped += 1;
                             self.blf.reader.seek(std::io::SeekFrom::Current(1)).unwrap();
-                            return self.next(); // todo remove recursion!
+                            self.next() // todo remove recursion!
                         }
                         _ => {
-                            println!("Error: {:?}", e);
-                            return None;
+                            // ... sadly no own type for "Error: not enough bytes in reader..."
+                            // which is kind of expected quite often
+                            //println!("Error: {:?}", e);
+                            None
                         }
                     }
                 }
@@ -170,6 +126,7 @@ pub struct BlfFileStats {
     _reserved: [u32; 18],
 }
 
+// MARK: Object
 #[derive(Debug, BinRead)]
 #[br(little, magic = b"LOBJ")]
 pub struct Object {
@@ -177,32 +134,48 @@ pub struct Object {
     pub header_version: u16,
     pub object_size: u32,
     pub object_type: u32,
+    #[br(args{object_type, remaining_size:object_size - (4+2+2+4+4)})]
+    pub data: ObjectTypes,
 }
 
 #[derive(Debug, BinRead)]
+#[br(little,import{remaining_size: u32, object_type: u32})]
+pub enum ObjectTypes {
+    #[br(pre_assert(object_type == 10))]
+    LogContainer10(#[br(args{object_size:remaining_size})] LogContainer),
+    #[br(pre_assert([65, 72, 6, 7, 8, 9, 90, 96, 92].contains(&object_type)))]
+    UnsupportedPadded {
+        #[br(count = remaining_size)]
+        data: Vec<u8>,
+        #[br(count=(remaining_size)%4)]
+        padding: Vec<u8>,
+    },
+    Unsupported(#[br(count = remaining_size)] Vec<u8>),
+}
+
+// MARK: LogContainer
+#[derive(Debug, BinRead)]
 #[br(little,import{object_size: u32})]
-struct LogContainer {
+pub struct LogContainer {
     // object_type == 10
     #[br(calc = object_size - (2 + 6 + 4 + 4))]
-    compressed_size: u32,
-    compression_method: u16,
-    unknown: [u8; 6],
-    uncompressed_size: u32,
-    unknown2: u32, //[u8;4], // 0xffffff or 0x1a6
+    pub compressed_size: u32,
+    pub compression_method: u16,
+    _unknown: [u8; 6],
+    pub uncompressed_size: u32,
+    _unknown2: u32, //[u8;4], // 0xffffff or 0x1a6
     #[br(pad_after=compressed_size%4, count = compressed_size)]
     // weird, should be aligned not pad_after. e.g. compr_size = 1 -> pad_after = 3... but it's not!
     compressed_data: Vec<u8>,
 }
 
-struct LogContainerIter {
-    data_len: usize,
+pub struct LogContainerIter {
     cursor: std::io::Cursor<Vec<u8>>,
 }
 
 impl LogContainerIter {
     fn new(data: Vec<u8>) -> LogContainerIter {
         LogContainerIter {
-            data_len: data.len(),
             cursor: std::io::Cursor::new(data),
         }
     }
@@ -221,45 +194,8 @@ impl LogContainerIter {
 impl Iterator for LogContainerIter {
     type Item = Object;
     fn next(&mut self) -> Option<Self::Item> {
-        let init_pos = self.cursor.position();
         match Object::read(&mut self.cursor) {
-            Ok(obj) => {
-                let mut unprocessed =
-                    if obj.object_size > (std::mem::size_of::<Object>() + 4) as u32 {
-                        obj.object_size - (std::mem::size_of::<Object>() + 4) as u32
-                    } else {
-                        0
-                    };
-                let to_skip = match obj.object_type {
-                    _ => {
-                        /*println!(
-                            "LogContainerIter: unknown object type {}, unprocessed={}",
-                            obj.object_type, unprocessed
-                        );*/
-                        if [65, 72, 6, 7, 8, 9, 90, 96, 92].contains(&obj.object_type) {
-                            unprocessed += unprocessed % 4; // if unprocessed %4 >0 {4-(unprocessed % 4)}else{0}; // align to 4 bytes (weird here again)
-                        }
-                        //unprocessed += if unprocessed %4 >0 {4-(unprocessed % 4)}else{0}; // align to 4 bytes (weird here again)
-                        unprocessed
-                    }
-                };
-                if to_skip > 0 {
-                    let old_pos = self.cursor.position();
-                    if old_pos + to_skip as u64 > self.data_len as u64 {
-                        //println!("LogContainerIter: skipping {} > data_len", to_skip);
-                        // need to seek back and return the rem. data properly as this obj is not fully avail
-                        self.cursor
-                            .seek(std::io::SeekFrom::Start(init_pos))
-                            .unwrap();
-                        return None;
-                    }
-                    //println!("LogContainerIter: skipping {}", to_skip);
-                    self.cursor
-                        .seek(std::io::SeekFrom::Current(to_skip as i64))
-                        .unwrap();
-                }
-                Some(obj)
-            }
+            Ok(obj) => Some(obj),
             Err(e) => {
                 if e.is_eof() {
                     None
@@ -272,7 +208,7 @@ impl Iterator for LogContainerIter {
                             self.next() // todo remove recursion!
                         }
                         _ => {
-                            println!("Error: {:?}", e);
+                            // println!("Error: {:?}", e);
                             None
                         }
                     }
@@ -297,7 +233,9 @@ impl LogContainer {
             }
             2 => {
                 // zlib
-                let options = DeflateOptions::default().set_limit(self.uncompressed_size as usize).set_size_hint(self.uncompressed_size as usize);
+                let options = DeflateOptions::default()
+                    .set_limit(self.uncompressed_size as usize)
+                    .set_size_hint(self.uncompressed_size as usize);
                 let mut decoder =
                     DeflateDecoder::new_with_options(self.compressed_data.as_slice(), options);
                 match decoder.decode_zlib() {
@@ -584,7 +522,7 @@ mod tests {
     #[test]
     fn empty() {
         assert_eq!(std::mem::size_of::<BlfFileStats>(), 144);
-        assert_eq!(std::mem::size_of::<Object>(), 12);
+        //assert_eq!(std::mem::size_of::<Object>(), 12);
         //assert_eq!(std::mem::size_of::<LogContainer>(), 16+4);
 
         let file = std::fs::File::open("tests/empty.blf").unwrap();
@@ -606,7 +544,7 @@ mod tests {
         assert_eq!(blf.file_stats.api_version, 4070100);
         assert_eq!(blf.file_stats.file_size, 420);
         assert_eq!(blf.is_compressed(), false);
-        
+
         // 2 outer, 4 inner objects
 
         // we expect the regular ObjectIterator to not return the 2 outer LogContainer objects
@@ -616,31 +554,34 @@ mod tests {
 
     #[test]
     fn large() {
-        if let Ok(file) = std::fs::File::open("tests/private/001__2024-04-26__18-52-20_1_L001.blf"){
-        let reader = std::io::BufReader::new(file);
+        if let Ok(file) = std::fs::File::open("tests/private/001__2024-04-26__18-52-20_1_L001.blf")
+        {
+            let reader = std::io::BufReader::new(file);
 
-        let blf = BlfFile::from_reader(reader);
-        assert!(blf.is_ok());
-        let blf = blf.unwrap();
-        println!("{:?}", blf.file_stats);
-        assert_eq!(blf.file_stats.stats_size, 144);
-        assert_eq!(blf.file_stats.api_version, 4090103);
-        assert_eq!(blf.file_stats.file_size, 17267752);
-        assert_eq!(blf.is_compressed(), true);
-        
-        let blf_iter = blf.into_iter();
-        assert_eq!(blf_iter.count(), 1933994);
+            let blf = BlfFile::from_reader(reader);
+            assert!(blf.is_ok());
+            let blf = blf.unwrap();
+            println!("{:?}", blf.file_stats);
+            assert_eq!(blf.file_stats.stats_size, 144);
+            assert_eq!(blf.file_stats.api_version, 4090103);
+            assert_eq!(blf.file_stats.file_size, 17267752);
+            assert_eq!(blf.is_compressed(), true);
 
-        // re-use the blf (not possible as the iter consumes)
-        let file = std::fs::File::open("tests/private/001__2024-04-26__18-52-20_1_L001.blf").unwrap();
-        let reader = std::io::BufReader::new(file);
+            let blf_iter = blf.into_iter();
+            assert_eq!(blf_iter.count(), 1933994);
 
-        let blf = BlfFile::from_reader(reader);
-        assert!(blf.is_ok());
-        let blf_iter = blf.into_iter();
-        for (_idx, _obj) in blf_iter.enumerate() {
-            //println!("({})={:?}", idx+1, obj);
+            // re-use the blf (not possible as the iter consumes)
+            /*
+            let file = std::fs::File::open("tests/private/001__2024-04-26__18-52-20_1_L001.blf").unwrap();
+            let reader = std::io::BufReader::new(file);
+
+            let blf = BlfFile::from_reader(reader);
+            assert!(blf.is_ok());
+            let blf_iter = blf.unwrap().into_iter();
+            for (idx, obj) in blf_iter.enumerate() {
+                println!("({})={:?}", idx+1, obj);
+            }
+            */
         }
-    }
     }
 }

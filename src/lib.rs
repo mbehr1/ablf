@@ -1,4 +1,7 @@
-use std::io::{BufRead, Seek};
+use std::{
+    borrow::Cow,
+    io::{BufRead, Seek},
+};
 
 use binrw::BinRead;
 use zune_inflate::{DeflateDecoder, DeflateOptions};
@@ -151,16 +154,16 @@ pub struct ObjectHeader {
 #[derive(Debug, BinRead)]
 #[br(little,import{remaining_size: u32, object_type: u32})]
 pub enum ObjectTypes {
-    #[br(pre_assert(object_type == 10))]
-    LogContainer10(#[br(args{object_size:remaining_size})] LogContainer),
     #[br(pre_assert(object_type == 86))]
     CanMessage86(#[br(args{remaining_size})] CanMessage2),
-    #[br(pre_assert([65, 72, 6, 7, 8, 9, 90, 96, 92].contains(&object_type)))]
+    #[br(pre_assert(object_type == 10))]
+    LogContainer10(#[br(args{object_size:remaining_size})] LogContainer),
+    #[br(pre_assert(object_type == 65))]
+    AppText65(#[br(args{remaining_size})] AppText),
+    #[br(pre_assert([72, 6, 7, 8, 9, 90, 96, 92].contains(&object_type)))]
     UnsupportedPadded {
-        #[br(count = remaining_size)]
+        #[br(count = remaining_size, pad_after = remaining_size%4)]
         data: Vec<u8>,
-        #[br(count=(remaining_size)%4)]
-        padding: Vec<u8>,
     },
     Unsupported(#[br(count = remaining_size)] Vec<u8>),
 }
@@ -195,6 +198,37 @@ pub struct CanMessage2 {
     pub bit_count: u8,
     _reserved1: u8,
     _reserved2: u16,
+}
+
+#[derive(BinRead)]
+#[br(little,import{remaining_size: u32})]
+pub struct AppText {
+    pub header: ObjectHeader,
+    pub source: u32,
+    _reserved: u32,
+    _text_length: u32,
+    _reserved2: u32,
+    #[br(count = _text_length, pad_after = remaining_size%4)]
+    pub text: Vec<u8>,
+}
+
+// impl debug for AppText
+impl std::fmt::Debug for AppText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let text = self.to_string();
+        write!(f, "AppText {{ source: {}, text: {:?} }}", self.source, text)
+    }
+}
+
+impl<'a> AppText {
+    pub fn to_string(&'a self) -> Cow<'a, str> {
+        let is_zero_term = self.text.last().map_or(false, |&c| c == 0);
+        String::from_utf8_lossy(if is_zero_term {
+            &self.text[..self.text.len() - 1]
+        } else {
+            &self.text
+        })
+    }
 }
 
 pub struct LogContainerIter {

@@ -130,6 +130,7 @@ pub struct BlfFileStats {
 #[derive(Debug, BinRead)]
 #[br(little, magic = b"LOBJ")]
 pub struct Object {
+    // the next 4 are part of every header (ObjectHeaderBase)
     pub header_size: u16,
     pub header_version: u16,
     pub object_size: u32,
@@ -139,10 +140,21 @@ pub struct Object {
 }
 
 #[derive(Debug, BinRead)]
+#[br(little)]
+pub struct ObjectHeader {
+    pub flags: u32,
+    pub client_index: u16,
+    pub version: u16,
+    pub timestamp_ns: u64,
+}
+
+#[derive(Debug, BinRead)]
 #[br(little,import{remaining_size: u32, object_type: u32})]
 pub enum ObjectTypes {
     #[br(pre_assert(object_type == 10))]
     LogContainer10(#[br(args{object_size:remaining_size})] LogContainer),
+    #[br(pre_assert(object_type == 86))]
+    CanMessage86(#[br(args{remaining_size})] CanMessage2),
     #[br(pre_assert([65, 72, 6, 7, 8, 9, 90, 96, 92].contains(&object_type)))]
     UnsupportedPadded {
         #[br(count = remaining_size)]
@@ -167,6 +179,22 @@ pub struct LogContainer {
     #[br(pad_after=compressed_size%4, count = compressed_size)]
     // weird, should be aligned not pad_after. e.g. compr_size = 1 -> pad_after = 3... but it's not!
     compressed_data: Vec<u8>,
+}
+
+#[derive(Debug, BinRead)]
+#[br(little,import{remaining_size: u32})]
+pub struct CanMessage2 {
+    pub header: ObjectHeader,
+    pub channel: u16,
+    pub flags: u8,
+    pub dlc: u8,
+    pub id: u32,
+    #[br(count = remaining_size - ((std::mem::size_of::<ObjectHeader>() as u32)+(2+1+1+4+4+1+1+2)))]
+    pub data: Vec<u8>,
+    pub frame_length_ns: u32,
+    pub bit_count: u8,
+    _reserved1: u8,
+    _reserved2: u16,
 }
 
 pub struct LogContainerIter {

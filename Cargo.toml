@@ -1,0 +1,21 @@
+[package]
+name = "ablf"
+version = "0.1.0"
+edition = "2021"
+authors = ["Matthias Behr"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/mbehr1/ablf/"
+homepage = "https://github.com/mbehr1/ablf/"
+readme= "README.md"
+description = "Library to handle automotive binlog files (.blf)"
+keywords = ["dlt", "automotive", "blf", "analysis"]
+categories = ["development-tools", "parsing"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+binrw = "0.13"
+zune-inflate = "0.2"
+
+[package.metadata.workspaces]
+independent = true

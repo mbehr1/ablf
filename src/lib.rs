@@ -183,6 +183,8 @@ pub struct ObjectHeader {
 pub enum ObjectTypes {
     #[br(pre_assert(object_type == 86))]
     CanMessage86(#[br(args{remaining_size})] CanMessage2),
+    #[br(pre_assert(object_type == 73))]
+    CanErrorExt73(CanErrorFrameExt),
     #[br(pre_assert(object_type == 10))]
     LogContainer10(#[br(args{object_size:remaining_size})] LogContainer),
     #[br(pre_assert(object_type == 65))]
@@ -227,6 +229,24 @@ pub struct CanMessage2 {
     pub bit_count: u8,
     _reserved1: u8,
     _reserved2: u16,
+}
+
+#[derive(Debug, BinRead)]
+#[br(little)]
+pub struct CanErrorFrameExt {
+    pub header: ObjectHeader,
+    pub channel: u16,
+    pub length: u16, // CAN error frame length
+    pub flags: u32,
+    pub ecc: u8,
+    pub position: u8,
+    pub dlc: u8, // lower 4 bits: DLC from CAN-Core, upper 4 bits: reserved
+    _reserved1: u8,
+    pub frame_length_ns: u32,
+    pub id: u32, // frame id from CAN-Core
+    pub flags_ext: u16,
+    _reserved2: u16,
+    pub data: [u8; 8],
 }
 
 #[derive(BinRead)]

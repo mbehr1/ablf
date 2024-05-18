@@ -9,7 +9,7 @@ This library is a clean-room implementation based on information from the header
 Open/decode blf files
  - that are zlib/deflate compressed
  - iterate over all objects (outer ones and the first level of container ones)
- - decoding of CAN messages objects
+ - decoding of CAN messages (2), CAN error frame ext, App-Text objects
 
 ## License
 

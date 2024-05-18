@@ -15,6 +15,7 @@ categories = ["development-tools", "parsing"]
 
 [dependencies]
 binrw = "0.13"
+chrono = "0.4"
 zune-inflate = "0.2"
 
 [package.metadata.workspaces]

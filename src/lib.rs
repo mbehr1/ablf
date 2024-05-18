@@ -1,3 +1,4 @@
+use chrono::{NaiveDate, NaiveDateTime};
 use std::{
     borrow::Cow,
     io::{BufRead, Seek},
@@ -7,8 +8,14 @@ use binrw::BinRead;
 use zune_inflate::{DeflateDecoder, DeflateOptions};
 
 pub struct BlfFile<R: BufRead> {
-    reader: R,
-    file_stats: BlfFileStats,
+    pub reader: R,
+    pub file_stats: BlfFileStats,
+}
+
+impl<R: BufRead> BlfFile<R> {
+    pub fn is_valid(&self) -> bool {
+        self.file_stats.is_valid()
+    }
 }
 
 // MARK: IntoIterator
@@ -17,13 +24,17 @@ impl<R: BufRead + Seek> IntoIterator for BlfFile<R> {
     type IntoIter = ObjectIterator<R>;
 
     fn into_iter(mut self) -> Self::IntoIter {
-        // we do seek here once to the start of the objects:
-        let _ = self
-            .reader
-            .seek(std::io::SeekFrom::Start(self.file_stats.stats_size as u64));
-        // todo if not successful ensure that next returns None
+        let is_valid = if self.file_stats.is_valid() {
+            // we do seek here once to the start of the objects:
+            self.reader
+                .seek(std::io::SeekFrom::Start(self.file_stats.stats_size as u64))
+                .is_ok()
+        } else {
+            false
+        };
 
         ObjectIterator {
+            is_valid,
             blf: self,
             prev_cont_data: Vec::new(),
             skipped: 0,
@@ -39,6 +50,7 @@ impl<R: BufRead + Seek> IntoIterator for BlfFile<R> {
 /// It's a consuming iterator as it will use the Reader of the BlfFile.
 /// Use BltFile.into_iter() to get the iterator that seeks to Start of the objects.
 pub struct ObjectIterator<R: BufRead> {
+    is_valid: bool,
     blf: BlfFile<R>,
     prev_cont_data: Vec<u8>,
     cur_cont_iter: Option<LogContainerIter>,
@@ -55,6 +67,9 @@ impl<R: BufRead> ObjectIterator<R> {
 impl<R: BufRead + Seek> Iterator for ObjectIterator<R> {
     type Item = Object;
     fn next(&mut self) -> Option<Self::Item> {
+        if !self.is_valid {
+            return None;
+        }
         if let Some(iter) = &mut self.cur_cont_iter {
             if let Some(obj) = iter.next() {
                 return Some(obj);
@@ -109,14 +124,13 @@ impl<R: BufRead + Seek> Iterator for ObjectIterator<R> {
 }
 
 // MARK: BlfFileStats
-#[derive(Debug, BinRead)]
+#[derive(Debug, BinRead, Default)]
 #[br(little, magic = b"LOGG")]
 pub struct BlfFileStats {
     stats_size: u32,
     pub api_version: u32,
     pub application_id: u8,
     pub application_version: (u8, u8, u8),
-    #[br(dbg)]
     file_size: u64,
     uncompressed_size: u64,
     pub object_count: u32,
@@ -127,6 +141,19 @@ pub struct BlfFileStats {
     pub last_object_time: [u16; 8], // SYSTEMTIME
     #[br(if(stats_size == 144))]
     _reserved: [u32; 18],
+}
+
+impl BlfFileStats {
+    pub fn is_valid(&self) -> bool {
+        self.stats_size >= 4 + 4 + 8 + 8 + 4 + 4
+    }
+
+    pub fn measurement_start_time(&self) -> Option<NaiveDateTime> {
+        let ms = &self.measurement_start;
+        NaiveDate::from_ymd_opt(ms[0] as i32, ms[1] as u32, ms[3] as u32).and_then(|d| {
+            d.and_hms_milli_opt(ms[4] as u32, ms[5] as u32, ms[6] as u32, ms[7] as u32)
+        })
+    }
 }
 
 // MARK: Object
@@ -332,27 +359,26 @@ impl<R: BufRead> BlfFile<R> {
 }
 
 impl<R: BufRead + std::io::Seek> BlfFile<R> {
-    pub fn from_reader(mut reader: R) -> Result<BlfFile<R>, std::io::Error> {
-        // check header from the file whether it contains the magic number for blf files:
-        // let _buf = reader.fill_buf()?;
-
-        /*
-        if buf.len() < 4 {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "File is too short"));
-        }
-        let magic = &buf[0..4];
-        if magic != b"LOGG" {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "File is not a BLF file"));
-        }
-        reader.consume(4);*/
-
+    /// Create a BlfFile from a BufRead
+    ///
+    /// Verifies the magic and reads the BlfFileStats. If it can not be fully read an
+    /// error is returned with the reader handed back.
+    ///
+    /// If you want an invalid BlfFile, you can use:
+    /// ```
+    /// use ablf::{BlfFile, BlfFileStats};
+    /// let reader = std::io::Cursor::new(&[]);
+    /// let blf = BlfFile{reader: reader, file_stats: BlfFileStats::default()};
+    /// assert!(!blf.is_valid());
+    /// ```
+    pub fn from_reader(mut reader: R) -> Result<BlfFile<R>, (std::io::Error, R)> {
         let file_stats = match BlfFileStats::read(&mut reader) {
             Ok(blf) => blf,
             Err(e) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    e.to_string(),
-                ))
+                return Err((
+                    std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+                    reader,
+                ));
             }
         };
 
@@ -416,17 +442,21 @@ mod tests {
             assert_eq!(blf_iter.count(), 1933994);
 
             // re-use the blf (not possible as the iter consumes)
-            /*
-            let file = std::fs::File::open("tests/private/001__2024-04-26__18-52-20_1_L001.blf").unwrap();
+            // /*
+            let file =
+                std::fs::File::open("tests/private/001__2024-04-26__18-52-20_1_L001.blf").unwrap();
             let reader = std::io::BufReader::new(file);
 
             let blf = BlfFile::from_reader(reader);
             assert!(blf.is_ok());
             let blf_iter = blf.unwrap().into_iter();
             for (idx, obj) in blf_iter.enumerate() {
-                println!("({})={:?}", idx+1, obj);
+                println!("({})={:?}", idx + 1, obj);
+                if idx == 100 {
+                    break;
+                }
             }
-            */
+            // */
         }
     }
 }

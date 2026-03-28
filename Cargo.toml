@@ -14,9 +14,9 @@ categories = ["development-tools", "parsing"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-binrw = "0.13"
-chrono = "0.4"
-zune-inflate = "0.2"
+binrw = "0.15.1"
+chrono = "0.4.44"
+zune-inflate = "0.2.54"
 
 [package.metadata.workspaces]
 independent = true

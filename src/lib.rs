@@ -271,7 +271,7 @@ impl std::fmt::Debug for AppText {
 
 impl<'a> AppText {
     pub fn to_string(&'a self) -> Cow<'a, str> {
-        let is_zero_term = self.text.last().map_or(false, |&c| c == 0);
+        let is_zero_term = self.text.last().is_some_and(|&c| c == 0);
         String::from_utf8_lossy(if is_zero_term {
             &self.text[..self.text.len() - 1]
         } else {
@@ -395,10 +395,7 @@ impl<R: BufRead + std::io::Seek> BlfFile<R> {
         let file_stats = match BlfFileStats::read(&mut reader) {
             Ok(blf) => blf,
             Err(e) => {
-                return Err((
-                    std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
-                    reader,
-                ));
+                return Err((std::io::Error::other(e.to_string()), reader));
             }
         };
 
@@ -434,7 +431,7 @@ mod tests {
         assert_eq!(blf.file_stats.stats_size, 144);
         assert_eq!(blf.file_stats.api_version, 4070100);
         assert_eq!(blf.file_stats.file_size, 420);
-        assert_eq!(blf.is_compressed(), false);
+        assert!(!blf.is_compressed());
 
         // 2 outer, 4 inner objects
 
@@ -456,7 +453,7 @@ mod tests {
             assert_eq!(blf.file_stats.stats_size, 144);
             assert_eq!(blf.file_stats.api_version, 4090103);
             assert_eq!(blf.file_stats.file_size, 17267752);
-            assert_eq!(blf.is_compressed(), true);
+            assert!(blf.is_compressed());
 
             let blf_iter = blf.into_iter();
             assert_eq!(blf_iter.count(), 1933994);
